@@ -21,6 +21,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import ru.anton2319.vpnoverssh.data.singleton.PortForward;
 import ru.anton2319.vpnoverssh.data.singleton.SocksPersistent;
 import ru.anton2319.vpnoverssh.data.singleton.StatusInfo;
 
@@ -63,8 +64,17 @@ public class SocksProxyService extends VpnService {
     }
 
     @Override
+    public void onRevoke() {
+        StatusInfo.getInstance().setActive(false);
+        Thread sshThread = PortForward.getInstance().getSshThread();
+        if (sshThread != null) {
+            sshThread.interrupt();
+        }
+        super.onRevoke();
+    }
+
+    @Override
     public void onDestroy() {
-        super.onDestroy();
         Log.d(TAG, "Shutting down gracefully");
         AsyncTask.execute(new Runnable() {
             @Override
@@ -174,9 +184,11 @@ public class SocksProxyService extends VpnService {
             int mask = getMaximumMask(currentAddress, excludedIpsAton.isEmpty() ? endAddress : excludedIpsAton.get(0));
             long resultingAddress = currentAddress + subnetSize(mask);
             if(excludedIpsAton.contains(currentAddress)) {
+                Log.d(TAG, "Excluding: "+ipNTOA(currentAddress)+"/"+mask);
                 excludedIpsAton.remove(0);
             }
             else {
+                Log.v(TAG, "Adding: "+ipNTOA(currentAddress)+"/"+mask);
                 builder.addRoute(ipNTOA(currentAddress), mask);
             }
             currentAddress = resultingAddress;
@@ -210,9 +222,11 @@ public class SocksProxyService extends VpnService {
             int mask = getMaximumMask(currentAddress, excludedIpsAton.isEmpty() ? endAddress : excludedIpsAton.get(0));
             long resultingAddress = currentAddress + subnetSize(mask);
             if(excludedIpsAton.contains(currentAddress)) {
+                Log.d(TAG, "Excluding: "+ipNTOA(currentAddress)+"/"+mask);
                 excludedIpsAton.remove(0);
             }
             else {
+                Log.v(TAG, "Adding: "+ipNTOA(currentAddress)+"/"+mask);
                 builder.addRoute(ipNTOA(currentAddress), mask);
             }
             currentAddress = resultingAddress;
@@ -221,27 +235,42 @@ public class SocksProxyService extends VpnService {
 
     public static int getMaximumMask(long startingAddress, long maximumAddress) {
         int subnetMask = 32;
-        int maximumSubnetLimit = 8;
-        String[] ntoa_split = ipNTOA(startingAddress).split("\\.");
-        if(!ntoa_split[1].equals("0")) {
-            maximumSubnetLimit = 16;
-            if(!ntoa_split[2].equals("0")) {
-                maximumSubnetLimit = 24;
-                if(!ntoa_split[3].equals("0")) {
-                    maximumSubnetLimit = 32;
-                }
+        final byte[] octets = intToByteArrayBigEndian((int) startingAddress);
+
+        while (subnetMask > 0) {
+            long subnetSize = subnetSize(subnetMask - 1);
+            long nextResultingAddress = startingAddress + subnetSize;
+
+            if (nextResultingAddress > maximumAddress) {
+                break;
+            } else {
+                subnetMask--;
             }
         }
-        while (subnetMask > maximumSubnetLimit) {
-            long subnetSize = subnetSize(subnetMask - 1);
-            if((startingAddress + subnetSize) < maximumAddress) {
-                subnetMask = subnetMask - 1;
-            }
-            else {
+
+        while (subnetMask < 32) {
+            byte[] copyOctets = new byte[octets.length];
+            System.arraycopy(octets, 0, copyOctets, 0, octets.length);
+            if (maskValid(subnetMask, copyOctets)) {
                 break;
+            } else {
+                subnetMask++;
             }
         }
         return subnetMask;
+    }
+
+    public static boolean maskValid(int subnetMask, byte[] octets) {
+        int offset = subnetMask / 8;
+        if (offset < octets.length) {
+            for (octets[offset] <<= subnetMask % 8; offset < octets.length; ++offset) {
+                if (octets[offset] != 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return true;
     }
 
     public static long subnetSize(long subnetMask) {
@@ -269,5 +298,14 @@ public class SocksProxyService extends VpnService {
             }
         }
         return dottedDecimal.toString();
+    }
+
+    public static byte[] intToByteArrayBigEndian(int value) {
+        byte[] bytes = new byte[4];
+        bytes[0] = (byte) (value >> 24);
+        bytes[1] = (byte) (value >> 16);
+        bytes[2] = (byte) (value >> 8);
+        bytes[3] = (byte) value;
+        return bytes;
     }
 }
